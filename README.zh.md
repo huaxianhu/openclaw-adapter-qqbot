@@ -31,7 +31,9 @@
 
 | 功能 | 说明 |
 |------|------|
-| 🔒 **多场景支持** | C2C 私聊、群聊 @消息 |
+| 🔒 **多场景支持** | C2C 私聊、群聊（@提及 / 自主发言双模式） |
+| 👥 **群聊精细管控** | 按群配置 @触发规则、工具权限、自定义提示词、消息过滤 |
+| 🌐 **双传输模式** | WebSocket（默认）或 Webhook（HTTP 回调）— 配置切换 |
 | 🖼️ **富媒体消息** | 支持图片、语音、视频、文件的收发 |
 | 🎙️ **语音能力 (STT/TTS)** | 语音转文字自动转录 & 文字转语音回复 |
 | 🔥 **一键热更新** | 私聊发送 `/bot-upgrade` 即可完成版本升级，无需登录服务器 |
@@ -237,6 +239,24 @@ AI 可直接发送视频，支持本地文件和公网 URL。
 
 `/bot-clear-storage` 列出对话产生的文件以及下载的资源目录里的文件，使用`/bot-clear-storage -- force`确定删除。
 
+#### `/bot-group-allways` — 群消息响应模式切换
+
+> **你**：`/bot-group-allways`
+>
+> **QQBot**：🤖 群自主发言状态：❌ 仅被 @ 时回复
+
+运行时动态切换群聊默认 @触发行为，修改即时持久化，无需重启：
+
+| 子命令 | 说明 |
+|--------|------|
+| `/bot-group-allways on` | AI 自主判断何时发言（无需 @） |
+| `/bot-group-allways off` | 仅在被 @ 时回复 |
+| `/bot-group-allways`（无参数） | 查看当前设置 |
+
+> ⚠️ 此指令修改账户级 `defaultRequireMention`，优先级低于具体群的 `groups.{groupId}.requireMention` 配置。
+
+---
+
 ---
 
 ## 🚀 快速开始
@@ -403,13 +423,180 @@ openclaw message send --channel "qqbot" \
 
 #### 工作原理
 
-- 启动 `openclaw gateway` 后，所有 `enabled: true` 的账户会同时启动 WebSocket 连接
+- 启动 `openclaw gateway` 后，所有 `enabled: true` 的账户会同时启动连接（WebSocket 或 Webhook，取决于 `transport` 配置）
 - 每个账户独立维护 Token 缓存（基于 `appId` 隔离），互不干扰
 - 接收消息时，日志会带上 `[qqbot:accountId]` 前缀方便排查
 
 ---
 
-### 语音能力配置（STT / TTS）
+### Webhook 传输模式
+
+默认情况下，插件通过 **WebSocket** 连接 QQ 平台（出站连接，无需公网 IP）。你也可以切换为 **Webhook** 模式，由 QQ 平台主动 POST 事件到你的 HTTP 端点。
+
+| | WebSocket（默认） | Webhook |
+|---|---|---|
+| 连接方式 | 插件主动连接 QQ 网关 | QQ 平台 POST 到你的服务器 |
+| 公网 IP | 不需要 | 需要 |
+| 适用场景 | 开发调试、单实例部署 | 生产环境、水平扩展、Serverless |
+| 会话恢复 | 支持 RESUME | 无状态，无需恢复 |
+| 签名验证 | 平台内置 | 插件自动 Ed25519 验签 |
+
+#### 配置方式
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "appId": "111111111",
+      "clientSecret": "your-secret",
+      "transport": "webhook",
+      "webhook": {
+        "path": "/qqbot/webhook"
+      }
+    }
+  }
+}
+```
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `transport` | `"websocket"` | `"websocket"` 或 `"webhook"` |
+| `webhook.path` | `"/qqbot/webhook"` | 接收回调的 HTTP 路径 |
+
+#### 平台配置步骤
+
+1. 登录 [QQ 开放平台](https://q.qq.com/) → 开发设置 → 消息接收方式
+2. 选择 **HTTP 回调**
+3. 填写回调 URL：`https://your-domain.com/qqbot/webhook`
+4. 平台发送 `op:13` 验证请求，插件自动处理签名验证
+5. 验证通过后，所有事件将以 POST 方式推送到该地址
+
+---
+
+### 群聊配置
+
+插件提供灵活的群聊管控能力，支持按群定制触发规则、工具权限和 AI 行为策略。
+
+#### @提及触发模式（requireMention）
+
+默认情况下，群聊中**必须 @机器人**才会触发 AI 回复。你可以通过配置让 AI 自主判断是否需要发言：
+
+| 模式 | 配置值 | 行为 |
+|------|--------|------|
+| **仅 @时回复** | `true`（默认） | 群消息中只有 @了机器人才会触发回复 |
+| **自主发言** | `false` | AI 自主判断每条消息是否需要回复，无需 @ |
+
+**优先级链**（从高到低）：
+
+```
+具体群 groups.{groupOpenid}.requireMention
+  > 通配符 groups."*".requireMention
+    > 账户级 defaultRequireMention
+      > 默认值 true
+```
+
+**配置示例：**
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      // 账户级：所有群的默认行为
+      "defaultRequireMention": false,
+
+      "accounts": {
+        "default": {
+          "groups": {
+            "*": {
+              // 通配符：所有群的兜底规则
+              "requireMention": false
+            },
+            "GROUP_OPENID": {
+              // 单群覆盖：这个群仍然需要 @
+              "requireMention": true
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+> **使用场景举例：**
+>
+> - 工作群设为 `requireMention: true` — 避免 AI 对每条闲聊都插嘴
+> - 专属 AI 陪伴群设为 `requireMention: false` — 像真人一样自然参与对话
+> - 通过 `/bot-group-allways on|off` 指令可在运行时动态切换账户级默认值
+
+#### 其他群配置项
+
+除 `requireMention` 外，每个群还支持以下配置：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `ignoreOtherMentions` | `boolean` | `false` | 是否忽略 @了其他人但没 @机器人的消息。开启后这类消息直接丢弃，不记录历史、不触发 AI |
+| `toolPolicy` | `"full" \| "restricted" \| "none"` | `"restricted"` | 群聊中 AI 可使用的工具范围。`full`=全部可用；`restricted`=限制敏感工具（如命令执行、文件操作）；`none`=禁止所有工具调用 |
+| `prompt` | `string` | 内置默认提示词 | 该群专属的系统提示词，会追加到全局 systemPrompt 之后 |
+| `historyLimit` | `number` | `50` | 群历史消息缓存条数 |
+
+**完整群配置示例：**
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "defaultRequireMention": false,
+      "accounts": {
+        "default": {
+          "groups": {
+            "*": {
+              "requireMention": true,
+              "toolPolicy": "restricted",
+              "ignoreOtherMentions": true
+            },
+            "WORK_GROUP_OPENID": {
+              "requireMention": true,
+              "toolPolicy": "none",
+              "prompt": "你是工作助手，只回答与工作相关的问题"
+            },
+            "FRIEND_GROUP_OPENID": {
+              "requireMention": false,
+              "toolPolicy": "full",
+              "prompt": "你是群里的朋友，轻松随意地聊天"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+#### 群访问控制（groupPolicy）
+
+通过 `groupPolicy` 控制哪些群允许机器人加入并接收消息：
+
+| 策略 | 说明 |
+|------|------|
+| `"open"`（默认） | 所有群均可使用 |
+| `"allowlist"` | 仅 `groupAllowFrom` 白名单中的群可使用 |
+| `"disabled"` | 禁止所有群聊 |
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "groupPolicy": "allowlist",
+      "groupAllowFrom": ["ALLOWED_GROUP_OPENID_1", "ALLOWED_GROUP_OPENID_2"]
+    }
+  }
+}
+```
+
+> 也可通过 [**`/bot-group-allways`** 指令](#bot-group-allways--群消息响应模式切换) 在运行时动态切换账户级默认值，无需重启。
+
+---
 
 #### STT（语音转文字）— 自动转录用户发来的语音消息
 

@@ -23,6 +23,14 @@ interface QQBotChannelConfig {
   imageServerBaseUrl?: string;
   markdownSupport?: boolean;
   allowFrom?: string[];
+  /** HTTP/WebSocket User-Agent 追加后缀 */
+  userAgentSuffix?: string;
+  /** 群消息是否默认需要 @提及才触发回复 */
+  defaultRequireMention?: boolean;
+  /** 消息接收传输方式：websocket（默认）| webhook */
+  transport?: string;
+  /** webhook 传输配置（transport="webhook" 时生效） */
+  webhook?: { path?: string };
   accounts?: Record<string, {
     enabled?: boolean;
     appId?: string;

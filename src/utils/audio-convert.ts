@@ -1,8 +1,29 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
-import { decode, encode, isSilk } from "silk-wasm";
 import { detectFfmpeg, isWindows } from "./platform.js";
+
+// silk-wasm 动态加载（可选依赖，未安装时降级为不支持语音编解码）
+let silkWasm: { decode: typeof import("silk-wasm").decode; encode: typeof import("silk-wasm").encode; isSilk: typeof import("silk-wasm").isSilk } | null = null;
+let silkWasmLoaded = false;
+
+async function loadSilkWasm() {
+  if (silkWasmLoaded) return silkWasm;
+  silkWasmLoaded = true;
+  try {
+    silkWasm = await import("silk-wasm");
+  } catch {
+    console.warn("[audio-convert] silk-wasm not available, voice encoding/decoding disabled");
+    silkWasm = null;
+  }
+  return silkWasm;
+}
+
+// 同步版本的 isSilk（用于不方便 await 的场景），首次调用前需先 loadSilkWasm
+function isSilkSync(data: Uint8Array): boolean {
+  if (!silkWasm) return false;
+  return silkWasm.isSilk(data);
+}
 
 /**
  * 检查文件是否为 SILK 格式（QQ/微信语音常用格式）
@@ -12,7 +33,7 @@ import { detectFfmpeg, isWindows } from "./platform.js";
 function isSilkFile(filePath: string): boolean {
   try {
     const buf = fs.readFileSync(filePath);
-    return isSilk(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
+    return isSilkSync(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
   } catch {
     return false;
   }
@@ -91,14 +112,15 @@ export async function convertSilkToWav(
   const rawData = new Uint8Array(strippedBuf.buffer, strippedBuf.byteOffset, strippedBuf.byteLength);
 
   // 验证是否为 SILK 格式
-  if (!isSilk(rawData)) {
+  const silk = await loadSilkWasm();
+  if (!silk || !silk.isSilk(rawData)) {
     return null;
   }
 
   // SILK 解码为 PCM (s16le)
   // QQ 语音通常采样率为 24000Hz
   const sampleRate = 24000;
-  const result = await decode(rawData, sampleRate);
+  const result = await silk.decode(rawData, sampleRate);
 
   // PCM → WAV
   const wavBuffer = pcmToWav(result.data, sampleRate);
@@ -380,8 +402,12 @@ export async function pcmToSilk(
   pcmBuffer: Buffer,
   sampleRate: number,
 ): Promise<{ silkBuffer: Buffer; duration: number }> {
+  const silk = await loadSilkWasm();
+  if (!silk) {
+    throw new Error("silk-wasm not available, cannot encode PCM to SILK. Install silk-wasm to enable voice sending.");
+  }
   const pcmData = new Uint8Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength);
-  const result = await encode(pcmData, sampleRate);
+  const result = await silk.encode(pcmData, sampleRate);
   return {
     silkBuffer: Buffer.from(result.data.buffer, result.data.byteOffset, result.data.byteLength),
     duration: result.duration,
@@ -440,10 +466,11 @@ export async function audioFileToSilkBase64(filePath: string, directUploadFormat
   }
 
   // 1. .slk / .amr 扩展名 → 检测 SILK 魔数，是 SILK 则直传
+  const silk = await loadSilkWasm();
   if ([".slk", ".slac"].includes(ext)) {
     const stripped = stripAmrHeader(buf);
     const raw = new Uint8Array(stripped.buffer, stripped.byteOffset, stripped.byteLength);
-    if (isSilk(raw)) {
+    if (silk?.isSilk(raw)) {
       console.log(`[audio-convert] SILK file, direct use: ${filePath} (${buf.length} bytes)`);
       return buf.toString("base64");
     }
@@ -453,7 +480,7 @@ export async function audioFileToSilkBase64(filePath: string, directUploadFormat
   const rawCheck = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
   const strippedCheck = stripAmrHeader(buf);
   const strippedRaw = new Uint8Array(strippedCheck.buffer, strippedCheck.byteOffset, strippedCheck.byteLength);
-  if (isSilk(rawCheck) || isSilk(strippedRaw)) {
+  if (silk?.isSilk(rawCheck) || silk?.isSilk(strippedRaw)) {
     console.log(`[audio-convert] SILK detected by header: ${filePath} (${buf.length} bytes)`);
     return buf.toString("base64");
   }
@@ -544,10 +571,11 @@ export async function audioFileToSilkFile(filePath: string, directUploadFormats?
   }
 
   // 1. 已经是 SILK 编码 → 直接返回原文件
+  const silk = await loadSilkWasm();
   if ([".slk", ".slac"].includes(ext)) {
     const stripped = stripAmrHeader(buf);
     const raw = new Uint8Array(stripped.buffer, stripped.byteOffset, stripped.byteLength);
-    if (isSilk(raw)) {
+    if (silk?.isSilk(raw)) {
       console.log(`[audio-convert] SILK file, direct use: ${filePath} (${buf.length} bytes)`);
       return filePath;
     }
@@ -555,7 +583,7 @@ export async function audioFileToSilkFile(filePath: string, directUploadFormats?
   const rawCheck = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
   const strippedCheck = stripAmrHeader(buf);
   const strippedRaw = new Uint8Array(strippedCheck.buffer, strippedCheck.byteOffset, strippedCheck.byteLength);
-  if (isSilk(rawCheck) || isSilk(strippedRaw)) {
+  if (silk?.isSilk(rawCheck) || silk?.isSilk(strippedRaw)) {
     console.log(`[audio-convert] SILK detected by header: ${filePath} (${buf.length} bytes)`);
     return filePath;
   }

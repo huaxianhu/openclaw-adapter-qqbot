@@ -110,6 +110,50 @@ if (!openclawRoot) {
   }
 }
 
+// Strategy 4: pnpm global installation
+// pnpm stores globals in ~/Library/pnpm/global/<ver>/.pnpm/<pkg>@<version>.../node_modules/<pkg>
+// or resolves via `pnpm root -g`
+if (!openclawRoot) {
+  // 4a: try `pnpm root -g`
+  try {
+    const pnpmGlobalRoot = execSync("pnpm root -g", { encoding: "utf-8" }).trim();
+    for (const name of CLI_NAMES) {
+      const candidate = join(pnpmGlobalRoot, name);
+      if (existsSync(join(candidate, "package.json"))) {
+        openclawRoot = candidate;
+        break;
+      }
+    }
+  } catch {}
+
+  // 4b: resolve from the real binary path into .pnpm store
+  if (!openclawRoot) {
+    const whichCmd = process.platform === "win32" ? "where" : "which";
+    for (const name of CLI_NAMES) {
+      try {
+        const bin = execSync(`${whichCmd} ${name}`, { encoding: "utf-8" }).trim().split("\n")[0];
+        if (!bin) continue;
+        const realBin = realpathSync(bin);
+        // pnpm bin layout: .../node_modules/.pnpm/<pkg>@<ver>.../node_modules/<pkg>/dist/bin.js
+        // or .../node_modules/<pkg>/dist/bin.js (hoisted)
+        // Walk up to find node_modules/<name>/package.json
+        let dir = dirname(realBin);
+        for (let i = 0; i < 8; i++) {
+          const candidate = join(dir, "node_modules", name);
+          if (existsSync(join(candidate, "package.json"))) {
+            openclawRoot = candidate;
+            break;
+          }
+          const parent = dirname(dir);
+          if (parent === dir) break;
+          dir = parent;
+        }
+        if (openclawRoot) break;
+      } catch {}
+    }
+  }
+}
+
 if (!openclawRoot) {
   // Not fatal — plugin may work if openclaw loads it with proper alias resolution
   // But log a warning so upgrade scripts can detect the failure

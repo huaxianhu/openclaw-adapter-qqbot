@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.7.2] - 2026-06-05
+
+### Added
+
+- **Webhook Transport Mode**: Added HTTP webhook inbound transport alongside WebSocket as an alternative transport mode. Supports Ed25519 signature verification with automatic account routing for multi-account setups.
+- **Flexible Group @Trigger Rules**: New account-level `defaultRequireMention` field introduces a 4-tier priority chain — per-group > wildcard `*` > account-level > default — allowing groups to be configured as @-only or autonomous.
+- **`/bot-group-allways` Command**: Toggle group response mode at runtime (`on` / `off`). Changes are persisted to `openclaw.json` instantly; no gateway restart required.
+
 ## [1.7.1] - 2026-04-10
 
 ### Fixed

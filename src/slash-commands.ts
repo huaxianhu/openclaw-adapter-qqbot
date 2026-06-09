@@ -34,11 +34,16 @@ export function getFrameworkVersion(): string {
     // Windows 上 npm 安装的 CLI 通常是 .cmd wrapper，execFileSync 需要 shell:true 才能执行
     for (const cli of ["openclaw", "clawdbot", "moltbot"]) {
       try {
-        const out = execFileSync(cli, ["--version"], {
+        const rawOut = execFileSync(cli, ["--version"], {
           timeout: 3000, encoding: "utf8",
           ...(isWindows() ? { shell: true } : {}),
         }).trim();
         // 输出格式: "OpenClaw 2026.3.13 (61d171a)"
+        // CLI 启动时可能输出 proxy 等初始化日志到 stdout，需过滤出真正的版本行
+        const out = rawOut
+          .split("\n")
+          .find((line) => /^(OpenClaw|clawdbot|moltbot)\s/i.test(line))
+          ?.trim() ?? rawOut;
         if (out) {
           return out;
         }
@@ -332,7 +337,7 @@ registerCommand({
   ].join("\n"),
   handler: (ctx) => {
     // 群聊场景排除仅限私聊的指令
-    const GROUP_EXCLUDED_COMMANDS = new Set(["bot-upgrade", "bot-clear-storage"]);
+    const GROUP_EXCLUDED_COMMANDS = new Set(["bot-upgrade", "bot-clear-storage", "bot-logs", "bot-approve", "bot-group-allways", "bot-streaming"]);
     const isGroup = ctx.type === "group";
 
     const lines = [`### QQBot插件内置调试指令`, ``];
@@ -1637,7 +1642,12 @@ registerCommand({
     `导出最近的 OpenClaw 日志文件（最多 4 个）。`,
     `每个文件最多保留最后 1000 行，以文件形式返回。`,
   ].join("\n"),
-  handler: () => {
+  handler: (ctx) => {
+    // 日志导出仅在私聊中可用
+    if (ctx.type !== "c2c") {
+      return `💡 请在私聊中使用此指令`;
+    }
+
     const logDirs = collectCandidateLogDirs();
     const recentFiles = collectRecentLogFiles(logDirs).slice(0, 4);
 
@@ -2037,6 +2047,11 @@ registerCommand({
     `/bot-approve status     查看当前审批配置`,
   ].join("\n"),
   handler: async (ctx) => {
+    // 审批管理仅在私聊中可用
+    if (ctx.type !== "c2c") {
+      return `💡 请在私聊中使用此指令`;
+    }
+
     const arg = ctx.args.trim().toLowerCase();
 
     // 审批功能需要 openclaw >= 3.22（gateway-runtime 模块）
@@ -2256,6 +2271,125 @@ registerCommand({
       `可用选项: on | off | always | reset`,
       `输入 /bot-approve ? 查看详细用法`,
     ].join("\n");
+  },
+});
+
+// ============ /bot-group-allways ============
+
+/**
+ * /bot-group-allways on|off — 修改群消息默认响应模式
+ *
+ * 直接修改当前账户的 defaultRequireMention 配置项并持久化到 openclaw.json。
+ * 修改后即时生效（下一条消息起按新配置处理）。
+ *
+ * on = AI 自主判断何时发言（无需 @），off = 仅被 @ 时回复
+ */
+registerCommand({
+  name: "bot-group-allways",
+  description: "修改群消息默认响应模式",
+  usage: [
+    `/bot-group-allways on   AI 自主判断何时发言（无需 @）`,
+    `/bot-group-allways off  仅在被 @ 时回复`,
+    `/bot-group-allways      查看当前设置`,
+    ``,
+    `设为 on 后，AI 会自主判断每条消息是否需要回复（无需 @）。`,
+    `仍可通过 groups.{groupId}.requireMention 对单个群覆盖。`,
+    ``,
+    `优先级：具体群配置 > 通配符 "*" > defaultRequireMention（本指令）> 默认 true`,
+  ].join("\n"),
+  handler: async (ctx) => {
+    // 群响应模式设置仅在私聊中可用
+    if (ctx.type !== "c2c") {
+      return `💡 请在私聊中使用此指令`;
+    }
+
+    const arg = ctx.args.trim().toLowerCase();
+
+    // 读取当前 defaultRequireMention 状态
+    const currentVal = ctx.accountConfig?.defaultRequireMention;
+    const currentRequireMention = currentVal ?? true; // 未设置时硬编码默认为 true
+
+    // 无参数：查看当前状态
+    if (!arg) {
+      return [
+        `🤖 群自主发言状态：${currentRequireMention ? "❌ 仅被 @ 时回复" : "✅ 自主判断何时发言"}`,
+        `使用 <qqbot-cmd-input text="/bot-group-allways on" show="/bot-group-allways on"/> 设为自主发言`,
+        `使用 <qqbot-cmd-input text="/bot-group-allways off" show="/bot-group-allways off"/> 设为仅被 @ 时回复`,
+      ].join("\n");
+    }
+
+    if (arg !== "on" && arg !== "off") {
+      return `❌ 参数错误，请使用 on 或 off\n\n示例：/bot-group-allways on`;
+    }
+
+    const newRequireMention = arg === "off"; // on=自主发言(requireMention=false), off=仅被@时回复(requireMention=true)
+
+    // 如果状态没变，直接返回
+    if (newRequireMention === currentRequireMention) {
+      return `🤖 群自主发言已经是"${arg}"状态，无需操作`;
+    }
+
+    // 更新配置
+    try {
+      const runtime = getQQBotRuntime();
+      const configApi = runtime.config as {
+        loadConfig: () => Record<string, unknown>;
+        writeConfigFile: (cfg: unknown) => Promise<void>;
+      };
+
+      const currentCfg = structuredClone(configApi.loadConfig()) as Record<string, unknown>;
+      const qqbot = ((currentCfg.channels ?? {}) as Record<string, unknown>).qqbot as Record<string, unknown> | undefined;
+
+      if (!qqbot) {
+        return `❌ 配置文件中未找到 qqbot 通道配置`;
+      }
+
+      const accountId = ctx.accountId;
+      const isNamedAccount = accountId !== "default" && (qqbot.accounts as Record<string, Record<string, unknown>> | undefined)?.[accountId];
+
+      if (isNamedAccount) {
+        // 命名账户：更新 accounts.{accountId}.defaultRequireMention
+        const accounts = qqbot.accounts as Record<string, Record<string, unknown>>;
+        const acct = accounts[accountId] ?? {};
+        acct.defaultRequireMention = newRequireMention;
+        accounts[accountId] = acct;
+        qqbot.accounts = accounts;
+      } else {
+        // 默认账户：更新 qqbot.defaultRequireMention
+        qqbot.defaultRequireMention = newRequireMention;
+      }
+
+      await configApi.writeConfigFile(currentCfg);
+
+      return [
+        `✅ 群自主发言已设置为 ${newRequireMention ? "**off**（仅被 @ 时回复）" : "**on**（AI 自主判断何时发言）"}`,
+        ``,
+        newRequireMention
+          ? `仅在被 @ 机器人才会回复。`
+          : `AI 将自主判断群消息是否需要回复，无需被 @ 即可发言。`,
+        ``,
+      ].join("\n");
+    } catch (err) {
+      const fwVer = getFrameworkVersion();
+      return [
+        `❌ 当前版本不支持该指令`,
+        ``,
+        `🦞框架版本：${fwVer}`,
+        `🤖QQBot 插件版本：v${PLUGIN_VERSION}`,
+        ``,
+        `可通过以下命令手动设置：`,
+        ``,
+        `\`\`\`shell`,
+        `# 设为 AI 自主判断何时发言（defaultRequireMention=false）`,
+        `openclaw config set channels.qqbot.defaultRequireMention false`,
+        `# 或设为仅被 @ 时回复（defaultRequireMention=true）`,
+        `openclaw config set channels.qqbot.defaultRequireMention true`,
+        ``,
+        `# 重启网关使配置生效`,
+        `openclaw gateway restart`,
+        `\`\`\``,
+      ].join("\n");
+    }
   },
 });
 

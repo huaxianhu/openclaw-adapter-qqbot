@@ -29,6 +29,8 @@ export interface ResolvedQQBotAccount {
   imageServerBaseUrl?: string;
   /** 是否支持 markdown 消息（默认 true） */
   markdownSupport: boolean;
+  /** User-Agent 追加后缀（从通道级配置 channels.qqbot.userAgentSuffix 解析） */
+  userAgentSuffix?: string;
   config: QQBotAccountConfig;
 }
 
@@ -57,6 +59,15 @@ export interface GroupConfig {
   historyLimit?: number;
 }
 
+/** 消息接收传输方式 */
+export type TransportMode = "websocket" | "webhook";
+
+/** Webhook 传输配置 */
+export interface WebhookTransportConfig {
+  /** 监听路径（默认 /qqbot/webhook） */
+  path?: string;
+}
+
 /**
  * QQ Bot 账户配置
  */
@@ -68,6 +79,10 @@ export interface QQBotAccountConfig {
   clientSecretFile?: string;
   dmPolicy?: "open" | "pairing" | "allowlist";
   allowFrom?: string[];
+  /** 消息接收传输方式：websocket（默认）| webhook */
+  transport?: TransportMode;
+  /** webhook 传输配置（transport="webhook" 时生效） */
+  webhook?: WebhookTransportConfig;
   /** 群消息策略（默认 allowlist） */
   groupPolicy?: GroupPolicy;
   /** 群白名单（groupPolicy 为 allowlist 时生效） */
@@ -115,6 +130,12 @@ export interface QQBotAccountConfig {
    */
   upgradePkg?: string;
   /**
+   * 群消息是否默认需要 @机器人才响应（默认 true）
+   * 优先级低于 groups.{groupId}.requireMention 和 groups."*".requireMention
+   * 设为 false 时，所有群默认无需 @ 即触发回复（仍可被群级配置覆盖）
+   */
+  defaultRequireMention?: boolean;
+  /**
    * 出站消息合并回复（debounce）配置
    * 当短时间内收到多次 deliver 时，将文本合并为一条消息发送，避免消息轰炸
    */
@@ -124,7 +145,7 @@ export interface QQBotAccountConfig {
    * 启用后，AI 的回复会以流式形式逐步显示在 QQ 聊天中，
    * 用户可以看到文字逐字出现的打字机效果。
    * 设置为 true 可开启流式消息。
-   * 
+   *
    * 注意：仅 C2C（私聊）支持流式消息 API。
    */
   streaming?: boolean;
